@@ -256,7 +256,7 @@ func (ch *ConversationsHandler) ConversationsAddMessageHandler(ctx context.Conte
 
 	messages := ch.convertMessagesFromHistory(history.Messages, historyParams.ChannelID, false)
 	if len(messages) > 0 {
-		messages[0].Text = text.ProcessText(params.text)
+		messages[0].Text = params.text
 	}
 	return marshalMessagesToCSV(messages)
 }

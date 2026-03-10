@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/korotovsky/slack-mcp-server/pkg/provider"
@@ -15,6 +17,8 @@ import (
 	"github.com/slack-go/slack"
 	"go.uber.org/zap"
 )
+
+const slackFilesDir = "/tmp/slack-files"
 
 const maxFileSize = 50 * 1024 * 1024 // 50MB
 
@@ -59,31 +63,48 @@ func (fh *FilesHandler) FilesGetContentHandler(ctx context.Context, request mcp.
 	token := fh.apiProvider.Token()
 	httpClient := fh.apiProvider.HTTPClient()
 
+	data, err := downloadFile(httpClient, downloadURL, token)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download file: %w", err)
+	}
+
+	localPath, err := saveToLocal(file.ID, file.Name, data)
+	if err != nil {
+		fh.logger.Error("failed to save file locally", zap.String("file_id", fileID), zap.Error(err))
+		// Non-fatal: continue returning content even if local save fails.
+		localPath = ""
+	}
+
+	downloadLine := ""
+	if localPath != "" {
+		downloadLine = fmt.Sprintf("\nDownloaded to: %s", localPath)
+	}
+
 	if isTextFile(file.Mimetype, file.Name) {
-		data, err := downloadFile(httpClient, downloadURL, token)
-		if err != nil {
-			return nil, fmt.Errorf("failed to download file: %w", err)
-		}
-		return mcp.NewToolResultText(string(data)), nil
+		return mcp.NewToolResultText(string(data) + downloadLine), nil
 	}
 
 	if strings.HasPrefix(file.Mimetype, "image/") {
-		data, err := downloadFile(httpClient, downloadURL, token)
-		if err != nil {
-			return nil, fmt.Errorf("failed to download image: %w", err)
-		}
 		encoded := base64.StdEncoding.EncodeToString(data)
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{mcp.ImageContent{
+		content := []mcp.Content{
+			mcp.ImageContent{
 				Type:     "image",
 				Data:     encoded,
 				MIMEType: file.Mimetype,
-			}},
-		}, nil
+			},
+		}
+		if localPath != "" {
+			content = append(content, mcp.TextContent{
+				Type: "text",
+				Text: fmt.Sprintf("Downloaded to: %s", localPath),
+			})
+		}
+		return &mcp.CallToolResult{Content: content}, nil
 	}
 
-	metadata := fmt.Sprintf("File: %s\nType: %s\nSize: %d bytes\nPermalink: %s\n(Binary file — content not downloaded)", file.Name, file.Mimetype, file.Size, file.Permalink)
-	return mcp.NewToolResultText(metadata), nil
+	// Binary file: return metadata + download path.
+	metadata := fmt.Sprintf("File: %s\nType: %s\nSize: %d bytes\nPermalink: %s", file.Name, file.Mimetype, file.Size, file.Permalink)
+	return mcp.NewToolResultText(metadata + downloadLine), nil
 }
 
 // FilesSendHandler uploads a file to a Slack channel or thread.
@@ -142,6 +163,29 @@ func (fh *FilesHandler) FilesSendHandler(ctx context.Context, request mcp.CallTo
 
 	result := fmt.Sprintf("File uploaded successfully.\nFile ID: %s\nTitle: %s", summary.ID, summary.Title)
 	return mcp.NewToolResultText(result), nil
+}
+
+// saveToLocal writes data to /tmp/slack-files/<filename>, creating the
+// directory if needed. If a file with the same name already exists the Slack
+// file ID is appended before the extension to make it unique.
+func saveToLocal(fileID, filename string, data []byte) (string, error) {
+	if err := os.MkdirAll(slackFilesDir, 0o755); err != nil {
+		return "", fmt.Errorf("create directory %s: %w", slackFilesDir, err)
+	}
+
+	dest := filepath.Join(slackFilesDir, filename)
+	if _, err := os.Stat(dest); err == nil {
+		// File exists — make the name unique by inserting the file ID.
+		ext := filepath.Ext(filename)
+		base := strings.TrimSuffix(filename, ext)
+		dest = filepath.Join(slackFilesDir, base+"_"+fileID+ext)
+	}
+
+	if err := os.WriteFile(dest, data, 0o644); err != nil {
+		return "", fmt.Errorf("write file %s: %w", dest, err)
+	}
+
+	return dest, nil
 }
 
 func isTextFile(mimetype, filename string) bool {

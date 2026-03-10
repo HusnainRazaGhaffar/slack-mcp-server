@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io/ioutil"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,6 +97,7 @@ type SlackAPI interface {
 type MCPSlackClient struct {
 	slackClient *slack.Client
 	edgeClient  *edge.Client
+	httpClient  *http.Client
 
 	authResponse *slack.AuthTestResponse
 	authProvider auth.Provider
@@ -172,6 +174,7 @@ func NewMCPSlackClient(authProvider auth.Provider, logger *zap.Logger) (*MCPSlac
 	return &MCPSlackClient{
 		slackClient:  slackClient,
 		edgeClient:   edgeClient,
+		httpClient:   httpClient,
 		authResponse: authResponse,
 		authProvider: authProvider,
 		isEnterprise: isEnterprise,
@@ -300,6 +303,10 @@ func (c *MCPSlackClient) UploadFileV2Context(ctx context.Context, params slack.U
 
 func (c *MCPSlackClient) Token() string {
 	return c.authProvider.SlackToken()
+}
+
+func (c *MCPSlackClient) HTTPClient() *http.Client {
+	return c.httpClient
 }
 
 func (c *MCPSlackClient) ClientUserBoot(ctx context.Context) (*edge.ClientUserBootResponse, error) {
@@ -789,6 +796,14 @@ func (ap *ApiProvider) Token() string {
 		return ""
 	}
 	return client.Token()
+}
+
+func (ap *ApiProvider) HTTPClient() *http.Client {
+	client, ok := ap.client.(*MCPSlackClient)
+	if !ok || client == nil {
+		return http.DefaultClient
+	}
+	return client.HTTPClient()
 }
 
 func mapChannel(

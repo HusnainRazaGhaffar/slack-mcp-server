@@ -57,9 +57,10 @@ func (fh *FilesHandler) FilesGetContentHandler(ctx context.Context, request mcp.
 	}
 
 	token := fh.apiProvider.Token()
+	httpClient := fh.apiProvider.HTTPClient()
 
 	if isTextFile(file.Mimetype, file.Name) {
-		data, err := downloadFile(downloadURL, token)
+		data, err := downloadFile(httpClient, downloadURL, token)
 		if err != nil {
 			return nil, fmt.Errorf("failed to download file: %w", err)
 		}
@@ -67,7 +68,7 @@ func (fh *FilesHandler) FilesGetContentHandler(ctx context.Context, request mcp.
 	}
 
 	if strings.HasPrefix(file.Mimetype, "image/") {
-		data, err := downloadFile(downloadURL, token)
+		data, err := downloadFile(httpClient, downloadURL, token)
 		if err != nil {
 			return nil, fmt.Errorf("failed to download image: %w", err)
 		}
@@ -173,14 +174,14 @@ func isTextFile(mimetype, filename string) bool {
 	return false
 }
 
-func downloadFile(url, token string) ([]byte, error) {
+func downloadFile(client *http.Client, url, token string) ([]byte, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}

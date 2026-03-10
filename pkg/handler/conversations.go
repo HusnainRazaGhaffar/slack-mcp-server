@@ -48,6 +48,7 @@ type Message struct {
 	Text      string `json:"text"`
 	Time      string `json:"time"`
 	Reactions string `json:"reactions,omitempty"`
+	Files     string `json:"files,omitempty"`
 	Cursor    string `json:"cursor"`
 }
 
@@ -166,18 +167,45 @@ func (ch *ConversationsHandler) ConversationsAddMessageHandler(ctx context.Conte
 		options = append(options, slack.MsgOptionTS(params.threadTs))
 	}
 
+	// SLACK_MCP_ADD_MESSAGE_FORMAT controls how text/markdown is rendered:
+	//   "richtext" (default) — convert to rich_text blocks (native lists, code, no "Show more")
+	//   "mrkdwn" — convert to Slack mrkdwn and send as text (no "Show more" collapse)
+	//   "blocks" — convert to Block Kit section blocks (original behavior, may trigger collapse)
+	msgFormat := os.Getenv("SLACK_MCP_ADD_MESSAGE_FORMAT")
+	if msgFormat == "" {
+		msgFormat = "richtext"
+	}
+
 	switch params.contentType {
 	case "text/plain":
 		options = append(options, slack.MsgOptionDisableMarkdown())
 		options = append(options, slack.MsgOptionText(params.text, false))
 	case "text/markdown":
-		blocks, err := slackGoUtil.ConvertMarkdownTextToBlocks(params.text)
-		if err != nil {
-			ch.logger.Warn("Markdown parsing error", zap.Error(err))
-			options = append(options, slack.MsgOptionDisableMarkdown())
-			options = append(options, slack.MsgOptionText(params.text, false))
-		} else {
-			options = append(options, slack.MsgOptionBlocks(blocks...))
+		switch msgFormat {
+		case "blocks":
+			blocks, err := slackGoUtil.ConvertMarkdownTextToBlocks(params.text)
+			if err != nil {
+				ch.logger.Warn("Markdown parsing error, falling back to mrkdwn text", zap.Error(err))
+				mrkdwnText := text.ConvertMarkdownToMrkdwn(params.text)
+				options = append(options, slack.MsgOptionText(mrkdwnText, false))
+			} else {
+				options = append(options, slack.MsgOptionBlocks(blocks...))
+			}
+		case "mrkdwn":
+			mrkdwnText := text.ConvertMarkdownToMrkdwn(params.text)
+			options = append(options, slack.MsgOptionText(mrkdwnText, false))
+		default:
+			// "richtext" or any unrecognized value — use rich_text blocks
+			rtBlock := text.ConvertMarkdownToRichTextBlock(params.text)
+			if rtBlock != nil {
+				plainText := text.StripMarkdownForPlainText(params.text)
+				options = append(options, slack.MsgOptionBlocks(rtBlock))
+				options = append(options, slack.MsgOptionText(plainText, false))
+			} else {
+				ch.logger.Warn("Rich text conversion returned nil, falling back to mrkdwn text")
+				mrkdwnText := text.ConvertMarkdownToMrkdwn(params.text)
+				options = append(options, slack.MsgOptionText(mrkdwnText, false))
+			}
 		}
 	default:
 		return nil, errors.New("content_type must be either 'text/plain' or 'text/markdown'")
@@ -227,6 +255,9 @@ func (ch *ConversationsHandler) ConversationsAddMessageHandler(ctx context.Conte
 	ch.logger.Debug("Fetched conversation history", zap.Int("message_count", len(history.Messages)))
 
 	messages := ch.convertMessagesFromHistory(history.Messages, historyParams.ChannelID, false)
+	if len(messages) > 0 {
+		messages[0].Text = text.ProcessText(params.text)
+	}
 	return marshalMessagesToCSV(messages)
 }
 
@@ -369,7 +400,7 @@ func (ch *ConversationsHandler) convertMessagesFromHistory(slackMessages []slack
 	warn := false
 
 	for _, msg := range slackMessages {
-		if (msg.SubType != "" && msg.SubType != "bot_message") && !includeActivity {
+		if (msg.SubType != "" && msg.SubType != "bot_message" && msg.SubType != "thread_broadcast") && !includeActivity {
 			continue
 		}
 
@@ -407,6 +438,7 @@ func (ch *ConversationsHandler) convertMessagesFromHistory(slackMessages []slack
 			ThreadTs:  msg.ThreadTimestamp,
 			Time:      timestamp,
 			Reactions: reactionsString,
+			Files:     formatFilesForCSV(msg.Files),
 		})
 	}
 
@@ -455,6 +487,7 @@ func (ch *ConversationsHandler) convertMessagesFromSearch(slackMessages []slack.
 			ThreadTs:  threadTs,
 			Time:      timestamp,
 			Reactions: "",
+			// Files: not available in search results (slack.SearchMessage has no Files field)
 		})
 	}
 
@@ -725,6 +758,17 @@ func (ch *ConversationsHandler) paramFormatChannel(raw string) (string, error) {
 		return "", fmt.Errorf("channel %q not found", raw)
 	}
 	return "", fmt.Errorf("invalid channel format: %q", raw)
+}
+
+func formatFilesForCSV(files []slack.File) string {
+	if len(files) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, f := range files {
+		parts = append(parts, fmt.Sprintf("%s:%s:%s:%d:%s", f.ID, f.Name, f.Mimetype, f.Size, f.Permalink))
+	}
+	return strings.Join(parts, "|")
 }
 
 func marshalMessagesToCSV(messages []Message) (*mcp.CallToolResult, error) {

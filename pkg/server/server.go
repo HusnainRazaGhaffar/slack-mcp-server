@@ -169,6 +169,44 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger) *MCPServer
 		),
 	), channelsHandler.ChannelsHandler)
 
+	filesHandler := handler.NewFilesHandler(provider, logger)
+
+	s.AddTool(mcp.NewTool("files_get_content",
+		mcp.WithDescription("Get the content of a file shared in Slack by its file ID."),
+		mcp.WithTitleAnnotation("Get File Content"),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithString("file_id",
+			mcp.Required(),
+			mcp.Description("Slack file ID (e.g., F0ADLAZ9Q5D). Discoverable from the Files column in conversation history/replies responses."),
+		),
+	), filesHandler.FilesGetContentHandler)
+
+	s.AddTool(mcp.NewTool("files_send",
+		mcp.WithDescription("Upload and send a file to a Slack channel, DM, or thread."),
+		mcp.WithTitleAnnotation("Send File"),
+		mcp.WithDestructiveHintAnnotation(true),
+		mcp.WithString("channel_id",
+			mcp.Required(),
+			mcp.Description("Channel or DM ID to send the file to."),
+		),
+		mcp.WithString("filename",
+			mcp.Required(),
+			mcp.Description("Name for the file (e.g., report.md, screenshot.png)."),
+		),
+		mcp.WithString("content",
+			mcp.Description("Text content for the file. Use this for text-based files. Mutually exclusive with content_base64."),
+		),
+		mcp.WithString("content_base64",
+			mcp.Description("Base64-encoded content for binary files (images, PDFs). Mutually exclusive with content."),
+		),
+		mcp.WithString("thread_ts",
+			mcp.Description("Thread timestamp to attach the file to a thread reply."),
+		),
+		mcp.WithString("initial_comment",
+			mcp.Description("Message text to accompany the uploaded file."),
+		),
+	), filesHandler.FilesSendHandler)
+
 	logger.Info("Authenticating with Slack API...",
 		zap.String("context", "console"),
 	)

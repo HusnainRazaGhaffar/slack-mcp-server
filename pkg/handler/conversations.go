@@ -46,6 +46,7 @@ type Message struct {
 	Channel   string `json:"channelID"`
 	ThreadTs  string `json:"ThreadTs"`
 	Text      string `json:"text"`
+	SubType   string `json:"subType"`
 	Time      string `json:"time"`
 	Reactions string `json:"reactions,omitempty"`
 	Files     string `json:"files,omitempty"`
@@ -400,7 +401,7 @@ func (ch *ConversationsHandler) convertMessagesFromHistory(slackMessages []slack
 	warn := false
 
 	for _, msg := range slackMessages {
-		if (msg.SubType != "" && msg.SubType != "bot_message" && msg.SubType != "thread_broadcast") && !includeActivity {
+		if (msg.SubType != "" && msg.SubType != "bot_message" && msg.SubType != "thread_broadcast" && msg.SubType != "huddle_thread") && !includeActivity {
 			continue
 		}
 
@@ -434,12 +435,31 @@ func (ch *ConversationsHandler) convertMessagesFromHistory(slackMessages []slack
 			UserName:  userName,
 			RealName:  realName,
 			Text:      text.ProcessText(msgText),
+			SubType:   msg.SubType,
 			Channel:   channel,
 			ThreadTs:  msg.ThreadTimestamp,
 			Time:      timestamp,
 			Reactions: reactionsString,
 			Files:     formatFilesForCSV(msg.Files),
 		})
+	}
+
+	// Enrich huddle_thread messages with room metadata (duration, participants)
+	var huddleTimestamps []string
+	for _, m := range messages {
+		if m.SubType == "huddle_thread" {
+			huddleTimestamps = append(huddleTimestamps, m.MsgID)
+		}
+	}
+	if len(huddleTimestamps) > 0 {
+		rooms := fetchHuddleRooms(ch.apiProvider.HTTPClient(), ch.apiProvider.Token(), channel, huddleTimestamps, ch.logger)
+		for i := range messages {
+			if messages[i].SubType == "huddle_thread" {
+				if room, ok := rooms[messages[i].MsgID]; ok {
+					messages[i].Text = formatHuddleText(room, usersMap.Users)
+				}
+			}
+		}
 	}
 
 	if ready, err := ch.apiProvider.IsReady(); !ready {
@@ -483,6 +503,7 @@ func (ch *ConversationsHandler) convertMessagesFromSearch(slackMessages []slack.
 			UserName:  userName,
 			RealName:  realName,
 			Text:      text.ProcessText(msgText),
+			SubType:   "",
 			Channel:   fmt.Sprintf("#%s", msg.Channel.Name),
 			ThreadTs:  threadTs,
 			Time:      timestamp,

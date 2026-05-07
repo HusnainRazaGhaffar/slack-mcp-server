@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -96,6 +97,7 @@ type addMessageParams struct {
 	threadTs    string
 	text        string
 	contentType string
+	blocks      []slack.Block
 }
 
 type addReactionParams struct {
@@ -221,21 +223,30 @@ func (ch *ConversationsHandler) ConversationsAddMessageHandler(ctx context.Conte
 		options = append(options, slack.MsgOptionTS(params.threadTs))
 	}
 
-	switch params.contentType {
-	case "text/plain":
-		options = append(options, slack.MsgOptionDisableMarkdown())
-		options = append(options, slack.MsgOptionText(params.text, false))
-	case "text/markdown":
-		blocks, err := slackGoUtil.ConvertMarkdownTextToBlocks(params.text)
-		if err != nil {
-			ch.logger.Warn("Markdown parsing error", zap.Error(err))
+	if params.blocks != nil {
+		// Raw blocks provided: use them directly. If text is also provided, it
+		// serves as the notification/fallback text.
+		options = append(options, slack.MsgOptionBlocks(params.blocks...))
+		if params.text != "" {
+			options = append(options, slack.MsgOptionText(params.text, false))
+		}
+	} else {
+		switch params.contentType {
+		case "text/plain":
 			options = append(options, slack.MsgOptionDisableMarkdown())
 			options = append(options, slack.MsgOptionText(params.text, false))
-		} else {
-			options = append(options, slack.MsgOptionBlocks(blocks...))
+		case "text/markdown":
+			blocks, err := slackGoUtil.ConvertMarkdownTextToBlocks(params.text)
+			if err != nil {
+				ch.logger.Warn("Markdown parsing error", zap.Error(err))
+				options = append(options, slack.MsgOptionDisableMarkdown())
+				options = append(options, slack.MsgOptionText(params.text, false))
+			} else {
+				options = append(options, slack.MsgOptionBlocks(blocks...))
+			}
+		default:
+			return nil, errors.New("content_type must be either 'text/plain' or 'text/markdown'")
 		}
-	default:
-		return nil, errors.New("content_type must be either 'text/plain' or 'text/markdown'")
 	}
 
 	unfurlOpt := os.Getenv("SLACK_MCP_ADD_MESSAGE_UNFURLING")
@@ -1698,10 +1709,6 @@ func (ch *ConversationsHandler) parseParamsToolAddMessage(ctx context.Context, r
 		// Backward compatibility with "payload" parameter
 		msgText = request.GetString("payload", "")
 	}
-	if msgText == "" {
-		ch.logger.Error("Message text missing")
-		return nil, errors.New("text must be a string")
-	}
 
 	contentType := request.GetString("content_type", "text/markdown")
 	if contentType != "text/plain" && contentType != "text/markdown" {
@@ -1709,11 +1716,49 @@ func (ch *ConversationsHandler) parseParamsToolAddMessage(ctx context.Context, r
 		return nil, errors.New("content_type must be either 'text/plain' or 'text/markdown'")
 	}
 
+	// Parse optional raw blocks JSON. Accepts blocks as either:
+	// - A JSON string containing a blocks array: "blocks": "[{...}]"
+	// - A raw JSON array (parsed by MCP SDK): "blocks": [{...}]
+	var blocks []slack.Block
+	args := request.GetArguments()
+	if rawBlocks, ok := args["blocks"]; ok && rawBlocks != nil {
+		var blocksJSON []byte
+		switch v := rawBlocks.(type) {
+		case string:
+			if v != "" {
+				blocksJSON = []byte(v)
+			}
+		default:
+			// Raw JSON array/object passed directly - re-marshal to bytes
+			var err error
+			blocksJSON, err = json.Marshal(v)
+			if err != nil {
+				ch.logger.Error("Failed to marshal blocks argument", zap.Error(err))
+				return nil, fmt.Errorf("blocks must be valid Slack Block Kit JSON: %w", err)
+			}
+		}
+		if blocksJSON != nil {
+			var slackBlocks slack.Blocks
+			if err := json.Unmarshal(blocksJSON, &slackBlocks); err != nil {
+				ch.logger.Error("Failed to parse blocks JSON", zap.Error(err))
+				return nil, fmt.Errorf("blocks must be valid Slack Block Kit JSON: %w", err)
+			}
+			blocks = slackBlocks.BlockSet
+		}
+	}
+
+	// Require either text or blocks
+	if msgText == "" && blocks == nil {
+		ch.logger.Error("Message text and blocks both missing")
+		return nil, errors.New("either text or blocks must be provided")
+	}
+
 	return &addMessageParams{
 		channel:     channel,
 		threadTs:    threadTs,
 		text:        msgText,
 		contentType: contentType,
+		blocks:      blocks,
 	}, nil
 }
 

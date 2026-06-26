@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -262,6 +263,7 @@ type SlackAPI interface {
 type MCPSlackClient struct {
 	slackClient *slack.Client
 	edgeClient  *edge.Client
+	httpClient  *http.Client
 
 	authResponse *slack.AuthTestResponse
 	authProvider auth.Provider
@@ -350,6 +352,7 @@ func NewMCPSlackClient(authProvider auth.Provider, logger *zap.Logger) (*MCPSlac
 	return &MCPSlackClient{
 		slackClient:  slackClient,
 		edgeClient:   edgeClient,
+		httpClient:   httpClient,
 		authResponse: authResponse,
 		authProvider: authProvider,
 		isEnterprise: isEnterprise,
@@ -615,6 +618,18 @@ func (c *MCPSlackClient) IsBotToken() bool {
 
 func (c *MCPSlackClient) IsOAuth() bool {
 	return c.isOAuth
+}
+
+// Token returns the Slack token configured for this client. Used by features
+// that issue raw HTTP calls to the Slack API (e.g. huddle room metadata).
+func (c *MCPSlackClient) Token() string {
+	return c.authProvider.SlackToken()
+}
+
+// HTTPClient returns the cookie-injecting HTTP client used to talk to Slack,
+// so callers can make raw requests that share the same auth/transport setup.
+func (c *MCPSlackClient) HTTPClient() *http.Client {
+	return c.httpClient
 }
 
 func (c *MCPSlackClient) Raw() struct {
@@ -1381,6 +1396,26 @@ func (ap *ApiProvider) IsBotToken() bool {
 func (ap *ApiProvider) IsOAuth() bool {
 	client, ok := ap.client.(*MCPSlackClient)
 	return ok && client != nil && client.IsOAuth()
+}
+
+// Token returns the configured Slack token, or "" when no concrete client is
+// available (e.g. demo mode).
+func (ap *ApiProvider) Token() string {
+	client, ok := ap.client.(*MCPSlackClient)
+	if !ok || client == nil {
+		return ""
+	}
+	return client.Token()
+}
+
+// HTTPClient returns the underlying Slack HTTP client, falling back to
+// http.DefaultClient when no concrete client is available (e.g. demo mode).
+func (ap *ApiProvider) HTTPClient() *http.Client {
+	client, ok := ap.client.(*MCPSlackClient)
+	if !ok || client == nil {
+		return http.DefaultClient
+	}
+	return client.HTTPClient()
 }
 
 // slackUserIDPattern matches Slack user IDs (e.g., U07VCEPP4N5, W0123456789).

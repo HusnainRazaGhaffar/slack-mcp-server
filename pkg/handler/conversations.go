@@ -59,6 +59,7 @@ type Message struct {
 	FileCount     int    `json:"fileCount,omitempty"`
 	AttachmentIDs string `json:"attachmentIDs,omitempty"`
 	HasMedia      bool   `json:"hasMedia,omitempty"`
+	SubType       string `json:"subType,omitempty"`
 	Cursor        string `json:"cursor"`
 }
 
@@ -1541,7 +1542,7 @@ func (ch *ConversationsHandler) convertMessagesFromHistory(ctx context.Context, 
 	warn := false
 
 	for _, msg := range slackMessages {
-		if (msg.SubType != "" && msg.SubType != "bot_message" && msg.SubType != "thread_broadcast") && !includeActivity {
+		if (msg.SubType != "" && msg.SubType != "bot_message" && msg.SubType != "thread_broadcast" && msg.SubType != "huddle_thread") && !includeActivity {
 			continue
 		}
 
@@ -1608,7 +1609,29 @@ func (ch *ConversationsHandler) convertMessagesFromHistory(ctx context.Context, 
 			FileCount:     fileCount,
 			AttachmentIDs: attachmentIDsStr,
 			HasMedia:      hasMedia,
+			SubType:       msg.SubType,
 		})
+	}
+
+	// Enrich huddle_thread messages with room metadata (duration, participants).
+	// slack-go drops the "room" field, so fetchHuddleRooms issues raw HTTP calls
+	// to conversations.history using the provider's authenticated client + token.
+	var huddleTimestamps []string
+	for _, m := range messages {
+		if m.SubType == "huddle_thread" {
+			huddleTimestamps = append(huddleTimestamps, m.MsgID)
+		}
+	}
+	if len(huddleTimestamps) > 0 {
+		usersMap := ch.apiProvider.ProvideUsersMap()
+		rooms := fetchHuddleRooms(ch.apiProvider.HTTPClient(), ch.apiProvider.Token(), channel, huddleTimestamps, ch.logger)
+		for i := range messages {
+			if messages[i].SubType == "huddle_thread" {
+				if room, ok := rooms[messages[i].MsgID]; ok {
+					messages[i].Text = formatHuddleText(room, usersMap.Users)
+				}
+			}
+		}
 	}
 
 	if ready, err := ch.apiProvider.IsReady(); !ready {

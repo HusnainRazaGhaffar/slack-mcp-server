@@ -233,18 +233,45 @@ func (ch *ConversationsHandler) ConversationsAddMessageHandler(ctx context.Conte
 			options = append(options, slack.MsgOptionText(params.text, false))
 		}
 	} else {
+		// SLACK_MCP_ADD_MESSAGE_FORMAT controls how text/markdown is rendered:
+		//   "richtext" (default) — rich_text blocks (native lists/code/quotes, no "Show more" collapse)
+		//   "mrkdwn" — Slack mrkdwn sent as top-level text (no collapse)
+		//   "blocks" — Block Kit section blocks (legacy behavior, may trigger collapse)
+		msgFormat := os.Getenv("SLACK_MCP_ADD_MESSAGE_FORMAT")
+		if msgFormat == "" {
+			msgFormat = "richtext"
+		}
+
 		switch params.contentType {
 		case "text/plain":
 			options = append(options, slack.MsgOptionDisableMarkdown())
 			options = append(options, slack.MsgOptionText(params.text, false))
 		case "text/markdown":
-			blocks, err := slackGoUtil.ConvertMarkdownTextToBlocks(params.text)
-			if err != nil {
-				ch.logger.Warn("Markdown parsing error", zap.Error(err))
-				options = append(options, slack.MsgOptionDisableMarkdown())
-				options = append(options, slack.MsgOptionText(params.text, false))
-			} else {
-				options = append(options, slack.MsgOptionBlocks(blocks...))
+			switch msgFormat {
+			case "blocks":
+				blocks, err := slackGoUtil.ConvertMarkdownTextToBlocks(params.text)
+				if err != nil {
+					ch.logger.Warn("Markdown parsing error, falling back to mrkdwn text", zap.Error(err))
+					mrkdwnText := text.ConvertMarkdownToMrkdwn(params.text)
+					options = append(options, slack.MsgOptionText(mrkdwnText, false))
+				} else {
+					options = append(options, slack.MsgOptionBlocks(blocks...))
+				}
+			case "mrkdwn":
+				mrkdwnText := text.ConvertMarkdownToMrkdwn(params.text)
+				options = append(options, slack.MsgOptionText(mrkdwnText, false))
+			default:
+				// "richtext" or any unrecognized value — use rich_text blocks
+				rtBlock := text.ConvertMarkdownToRichTextBlock(params.text)
+				if rtBlock != nil {
+					plainText := text.StripMarkdownForPlainText(params.text)
+					options = append(options, slack.MsgOptionBlocks(rtBlock))
+					options = append(options, slack.MsgOptionText(plainText, false))
+				} else {
+					ch.logger.Warn("Rich text conversion returned nil, falling back to mrkdwn text")
+					mrkdwnText := text.ConvertMarkdownToMrkdwn(params.text)
+					options = append(options, slack.MsgOptionText(mrkdwnText, false))
+				}
 			}
 		default:
 			return nil, errors.New("content_type must be either 'text/plain' or 'text/markdown'")

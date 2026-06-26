@@ -31,6 +31,7 @@ const (
 	ToolReactionsAdd                = "reactions_add"
 	ToolReactionsRemove             = "reactions_remove"
 	ToolAttachmentGetData           = "attachment_get_data"
+	ToolFilesSend                   = "files_send"
 	ToolConversationsSearchMessages = "conversations_search_messages"
 	ToolConversationsUnreads        = "conversations_unreads"
 	ToolConversationsMark           = "conversations_mark"
@@ -56,6 +57,7 @@ var ValidToolNames = []string{
 	ToolReactionsAdd,
 	ToolReactionsRemove,
 	ToolAttachmentGetData,
+	ToolFilesSend,
 	ToolConversationsSearchMessages,
 	ToolConversationsUnreads,
 	ToolConversationsMark,
@@ -249,6 +251,35 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 				mcp.Description("The ID of the attachment to download, in format Fxxxxxxxxxx. Attachment IDs (with filenames) can be found in the AttachmentIDs field of message metadata when FileCount > 0."),
 			),
 		), conversationsHandler.FilesGetHandler)
+	}
+
+	if shouldAddTool(ToolFilesSend, enabledTools, "SLACK_MCP_FILES_TOOL") {
+		filesHandler := handler.NewFilesHandler(provider, logger)
+		s.AddTool(mcp.NewTool(ToolFilesSend,
+			mcp.WithDescription("Upload and send a file to a Slack channel, DM, or thread. Disabled by default; enable with SLACK_MCP_FILES_TOOL. Maximum file size is 50MB."),
+			mcp.WithTitleAnnotation("Send File"),
+			mcp.WithDestructiveHintAnnotation(true),
+			mcp.WithString("channel_id",
+				mcp.Required(),
+				mcp.Description("Channel or DM ID to send the file to, in format Cxxxxxxxxxx or Dxxxxxxxxxx."),
+			),
+			mcp.WithString("filename",
+				mcp.Required(),
+				mcp.Description("Name for the file (e.g., report.md, screenshot.png)."),
+			),
+			mcp.WithString("content",
+				mcp.Description("Text content for the file. Use this for text-based files. Mutually exclusive with content_base64."),
+			),
+			mcp.WithString("content_base64",
+				mcp.Description("Base64-encoded content for binary files (images, PDFs). Mutually exclusive with content."),
+			),
+			mcp.WithString("thread_ts",
+				mcp.Description("Thread timestamp in format 1234567890.123456 to attach the file to a thread reply."),
+			),
+			mcp.WithString("initial_comment",
+				mcp.Description("Message text to accompany the uploaded file."),
+			),
+		), filesHandler.FilesSendHandler)
 	}
 
 	conversationsSearchTool := mcp.NewTool(ToolConversationsSearchMessages,

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/korotovsky/slack-mcp-server/pkg/provider"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -32,6 +33,9 @@ func (fh *FilesHandler) FilesSendHandler(ctx context.Context, request mcp.CallTo
 	channelID := request.GetString("channel_id", "")
 	if channelID == "" {
 		return nil, errors.New("channel_id is required")
+	}
+	if !isChannelAllowedForConfig(channelID, os.Getenv("SLACK_MCP_FILES_TOOL")) {
+		return nil, fmt.Errorf("channel %s is not allowed for files_send; set SLACK_MCP_FILES_TOOL to a comma-separated channel list to permit it", channelID)
 	}
 
 	filename := request.GetString("filename", "")

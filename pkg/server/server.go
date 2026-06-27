@@ -191,7 +191,7 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 				mcp.Description("Unique identifier of either a thread's parent message or a message in the thread_ts must be the timestamp in format 1234567890.123456 of an existing message with 0 or more replies. Optional, if not provided the message will be added to the channel itself, otherwise it will be added to the thread."),
 			),
 			mcp.WithString("text",
-				mcp.Description("Message text in specified content_type format. Example: 'Hello, world!' for text/plain or '# Hello, world!' for text/markdown."),
+				mcp.Description("Message body. With content_type 'text/markdown' (default) you MUST write standard Markdown (not Slack mrkdwn). Mentions MUST use Slack token syntax, never a bare @name: <@USER_ID> (user), <#CHANNEL_ID> (channel), <!subteam^GROUP_ID> (user group), <!here>/<!channel>/<!everyone> (broadcast). To mention a person, first call users_search to get their USER_ID; never invent an ID."),
 			),
 			mcp.WithString("content_type",
 				mcp.DefaultString("text/markdown"),

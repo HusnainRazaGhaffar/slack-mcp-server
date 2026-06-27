@@ -10,11 +10,12 @@ import (
 	"go.uber.org/zap"
 )
 
-// TestUnitFilesSendChannelAllowlist verifies the SLACK_MCP_FILES_TOOL per-channel
-// allowlist gate in FilesSendHandler (Issue 11). The gate runs before any
-// apiProvider use, so these cases need no Slack client: a denied channel returns
-// the allowlist error; an allowed channel passes the gate and then fails the
-// later "filename is required" check, which proves the gate let it through.
+// TestUnitFilesSendChannelAllowlist verifies the files_send channel gate (Issue
+// 11). files_send has no allowlist of its own: it reuses SLACK_MCP_ADD_MESSAGE_TOOL
+// as the single source of truth and fails closed when that is empty. The gate runs
+// before any apiProvider use, so these cases need no Slack client: a denied channel
+// returns the allowlist error; an allowed channel passes the gate and then fails
+// the later "filename is required" check, which proves the gate let it through.
 func TestUnitFilesSendChannelAllowlist(t *testing.T) {
 	fh := NewFilesHandler(nil, zap.NewNop())
 
@@ -30,7 +31,7 @@ func TestUnitFilesSendChannelAllowlist(t *testing.T) {
 	}
 
 	t.Run("denied channel rejected", func(t *testing.T) {
-		t.Setenv("SLACK_MCP_FILES_TOOL", "C_ALLOWED,D_ALLOWED")
+		t.Setenv("SLACK_MCP_ADD_MESSAGE_TOOL", "C_ALLOWED,D_ALLOWED")
 		req := newReq("C_DENIED", map[string]any{"filename": "x.txt", "content": "hi"})
 		res, err := fh.FilesSendHandler(context.Background(), req)
 		require.Error(t, err)
@@ -39,7 +40,7 @@ func TestUnitFilesSendChannelAllowlist(t *testing.T) {
 	})
 
 	t.Run("allowed channel passes the gate", func(t *testing.T) {
-		t.Setenv("SLACK_MCP_FILES_TOOL", "C_ALLOWED,D_ALLOWED")
+		t.Setenv("SLACK_MCP_ADD_MESSAGE_TOOL", "C_ALLOWED,D_ALLOWED")
 		// filename omitted on purpose: the request clears the allowlist gate and
 		// then fails the filename check, confirming the gate did not block it.
 		req := newReq("C_ALLOWED", nil)
@@ -50,8 +51,8 @@ func TestUnitFilesSendChannelAllowlist(t *testing.T) {
 		assert.Contains(t, err.Error(), "filename is required")
 	})
 
-	t.Run("true allows all channels", func(t *testing.T) {
-		t.Setenv("SLACK_MCP_FILES_TOOL", "true")
+	t.Run("add_message true allows all channels", func(t *testing.T) {
+		t.Setenv("SLACK_MCP_ADD_MESSAGE_TOOL", "true")
 		req := newReq("C_ANYTHING", nil)
 		_, err := fh.FilesSendHandler(context.Background(), req)
 		require.Error(t, err)
@@ -60,7 +61,7 @@ func TestUnitFilesSendChannelAllowlist(t *testing.T) {
 	})
 
 	t.Run("negation excludes the listed channel", func(t *testing.T) {
-		t.Setenv("SLACK_MCP_FILES_TOOL", "!C_BLOCKED")
+		t.Setenv("SLACK_MCP_ADD_MESSAGE_TOOL", "!C_BLOCKED")
 
 		denied := newReq("C_BLOCKED", map[string]any{"filename": "x.txt", "content": "hi"})
 		_, err := fh.FilesSendHandler(context.Background(), denied)
@@ -74,8 +75,18 @@ func TestUnitFilesSendChannelAllowlist(t *testing.T) {
 		assert.Contains(t, err.Error(), "filename is required")
 	})
 
+	t.Run("fail closed when add_message allowlist is empty", func(t *testing.T) {
+		// files_send shares the add_message allowlist; with it unset, every channel
+		// must be denied rather than silently treated as "all allowed".
+		t.Setenv("SLACK_MCP_ADD_MESSAGE_TOOL", "")
+		req := newReq("C_ANYTHING", map[string]any{"filename": "x.txt", "content": "hi"})
+		_, err := fh.FilesSendHandler(context.Background(), req)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not allowed for files_send")
+	})
+
 	t.Run("empty channel id rejected before allowlist", func(t *testing.T) {
-		t.Setenv("SLACK_MCP_FILES_TOOL", "true")
+		t.Setenv("SLACK_MCP_ADD_MESSAGE_TOOL", "true")
 		req := newReq("", nil)
 		_, err := fh.FilesSendHandler(context.Background(), req)
 		require.Error(t, err)

@@ -1514,6 +1514,20 @@ func isChannelAllowed(channel string) bool {
 	return isChannelAllowedForConfig(channel, os.Getenv("SLACK_MCP_ADD_MESSAGE_TOOL"))
 }
 
+// isChannelAllowedForFiles reports whether files_send may upload to channel.
+// files_send has no channel allowlist of its own: it reuses the add_message
+// allowlist (SLACK_MCP_ADD_MESSAGE_TOOL) as the single source of truth, so the
+// permitted channels never have to be configured twice. It fails closed when
+// that allowlist is unset, so an unconfigured add_message never silently lets
+// files_send upload everywhere.
+func isChannelAllowedForFiles(channel string) bool {
+	cfg := os.Getenv("SLACK_MCP_ADD_MESSAGE_TOOL")
+	if cfg == "" {
+		return false
+	}
+	return isChannelAllowedForConfig(channel, cfg)
+}
+
 func (ch *ConversationsHandler) resolveChannelID(ctx context.Context, channel string) (string, error) {
 	if !strings.HasPrefix(channel, "#") && !strings.HasPrefix(channel, "@") {
 		return channel, nil

@@ -254,9 +254,12 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 	}
 
 	if shouldAddTool(ToolFilesSend, enabledTools, "SLACK_MCP_FILES_TOOL") {
+		if os.Getenv("SLACK_MCP_ADD_MESSAGE_TOOL") == "" {
+			logger.Warn("files_send is enabled via SLACK_MCP_FILES_TOOL but SLACK_MCP_ADD_MESSAGE_TOOL is empty; files_send shares that allowlist and will deny all uploads until it is set")
+		}
 		filesHandler := handler.NewFilesHandler(provider, logger)
 		s.AddTool(mcp.NewTool(ToolFilesSend,
-			mcp.WithDescription("Upload and send a file to a Slack channel, DM, or thread. Disabled by default; enable with SLACK_MCP_FILES_TOOL. Maximum file size is 50MB."),
+			mcp.WithDescription("Upload and send a file to a Slack channel, DM, or thread. Disabled by default; enable with SLACK_MCP_FILES_TOOL. Uploads are limited to the same channels as SLACK_MCP_ADD_MESSAGE_TOOL. Maximum file size is 50MB."),
 			mcp.WithTitleAnnotation("Send File"),
 			mcp.WithDestructiveHintAnnotation(true),
 			mcp.WithString("channel_id",

@@ -355,11 +355,148 @@ func TestStripMarkdownForPlainText(t *testing.T) {
 			input:    "No formatting here",
 			expected: "No formatting here",
 		},
+		{
+			name:     "user mention preserved",
+			input:    "Ping <@U123>",
+			expected: "Ping <@U123>",
+		},
+		{
+			name:     "broadcast preserved",
+			input:    "Heads up <!here>",
+			expected: "Heads up <!here>",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := StripMarkdownForPlainText(tt.input)
 			assert.Equal(t, tt.expected, got)
+		})
+	}
+}
+
+func firstSection(t *testing.T, input string) *slack.RichTextSection {
+	t.Helper()
+	block := ConvertMarkdownToRichTextBlock(input)
+	require.NotEmpty(t, block.Elements, "rich text block has no elements")
+	section, ok := block.Elements[0].(*slack.RichTextSection)
+	require.True(t, ok, "expected *RichTextSection, got %T", block.Elements[0])
+	return section
+}
+
+// Issue 10: underscores inside a word must stay literal (CommonMark intraword
+// flanking). Asterisk emphasis is unaffected and covered elsewhere.
+func TestConvertMarkdownToRichTextBlock_IntrawordUnderscore(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		text  string
+	}{
+		{"single pair intraword", "foo_bar_baz", "foo_bar_baz"},
+		{"snake case name", "snake_case_name", "snake_case_name"},
+		{"one underscore", "a_b", "a_b"},
+		{"double intraword", "foo__bar__baz", "foo__bar__baz"},
+		{"open preceded by word", "x__bold__", "x__bold__"},
+		{"close followed by word", "__bold__s", "__bold__s"},
+		{"close followed by word single", "_foo_bar", "_foo_bar"},
+		{"digit prefix", "5_count_", "5_count_"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			section := firstSection(t, tt.input)
+			require.Len(t, section.Elements, 2) // literal text + trailing "\n"
+			assertTextElement(t, section.Elements[0], tt.text, nil)
+		})
+	}
+}
+
+// Issue 10: genuine word-boundary underscore emphasis still renders.
+func TestConvertMarkdownToRichTextBlock_UnderscoreItalicPreserved(t *testing.T) {
+	section := firstSection(t, "_italic_")
+	require.Len(t, section.Elements, 2)
+	assertTextElement(t, section.Elements[0], "italic", &slack.RichTextSectionTextStyle{Italic: true})
+}
+
+func TestConvertMarkdownToRichTextBlock_UnderscoreItalicInSentence(t *testing.T) {
+	section := firstSection(t, "an _emphasized_ word")
+	assertTextElement(t, section.Elements[0], "an ", nil)
+	assertTextElement(t, section.Elements[1], "emphasized", &slack.RichTextSectionTextStyle{Italic: true})
+	assertTextElement(t, section.Elements[2], " word", nil)
+}
+
+// Issue 9: Slack mention tokens become typed rich_text elements.
+func TestConvertMarkdownToRichTextBlock_UserMention(t *testing.T) {
+	section := firstSection(t, "Hey <@U123ABC> there")
+	require.Len(t, section.Elements, 4)
+	assertTextElement(t, section.Elements[0], "Hey ", nil)
+	user, ok := section.Elements[1].(*slack.RichTextSectionUserElement)
+	require.True(t, ok, "expected *RichTextSectionUserElement, got %T", section.Elements[1])
+	assert.Equal(t, "U123ABC", user.UserID)
+	assertTextElement(t, section.Elements[2], " there", nil)
+}
+
+func TestConvertMarkdownToRichTextBlock_UserMentionWithLabel(t *testing.T) {
+	section := firstSection(t, "<@U123ABC|alice>")
+	user, ok := section.Elements[0].(*slack.RichTextSectionUserElement)
+	require.True(t, ok, "expected *RichTextSectionUserElement, got %T", section.Elements[0])
+	assert.Equal(t, "U123ABC", user.UserID)
+}
+
+func TestConvertMarkdownToRichTextBlock_ChannelMention(t *testing.T) {
+	section := firstSection(t, "see <#C123ABC|general>")
+	ch, ok := section.Elements[1].(*slack.RichTextSectionChannelElement)
+	require.True(t, ok, "expected *RichTextSectionChannelElement, got %T", section.Elements[1])
+	assert.Equal(t, "C123ABC", ch.ChannelID)
+}
+
+func TestConvertMarkdownToRichTextBlock_UserGroupMention(t *testing.T) {
+	section := firstSection(t, "<!subteam^S123ABC|@team>")
+	ug, ok := section.Elements[0].(*slack.RichTextSectionUserGroupElement)
+	require.True(t, ok, "expected *RichTextSectionUserGroupElement, got %T", section.Elements[0])
+	assert.Equal(t, "S123ABC", ug.UsergroupID)
+}
+
+func TestConvertMarkdownToRichTextBlock_Broadcast(t *testing.T) {
+	for _, tt := range []struct{ input, rng string }{
+		{"<!here>", "here"},
+		{"<!channel>", "channel"},
+		{"<!everyone>", "everyone"},
+	} {
+		t.Run(tt.rng, func(t *testing.T) {
+			section := firstSection(t, tt.input)
+			b, ok := section.Elements[0].(*slack.RichTextSectionBroadcastElement)
+			require.True(t, ok, "expected *RichTextSectionBroadcastElement, got %T", section.Elements[0])
+			assert.Equal(t, tt.rng, string(b.Range))
+		})
+	}
+}
+
+// A mention inside bold inherits the surrounding style.
+func TestConvertMarkdownToRichTextBlock_MentionInBold(t *testing.T) {
+	section := firstSection(t, "**<@U1ABC>**")
+	user, ok := section.Elements[0].(*slack.RichTextSectionUserElement)
+	require.True(t, ok, "expected *RichTextSectionUserElement, got %T", section.Elements[0])
+	assert.Equal(t, "U1ABC", user.UserID)
+	require.NotNil(t, user.Style)
+	assert.True(t, user.Style.Bold)
+}
+
+// Malformed or unknown <...> stays literal.
+func TestConvertMarkdownToRichTextBlock_InvalidMentionLiteral(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		text  string
+	}{
+		{"no closing bracket", "a < b", "a < b"},
+		{"empty user id", "<@>", "<@>"},
+		{"lowercase user id", "<@u1>", "<@u1>"},
+		{"not a mention", "<notamention>", "<notamention>"},
+		{"unknown bang", "<!unknown>", "<!unknown>"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			section := firstSection(t, tt.input)
+			assertTextElement(t, section.Elements[0], tt.text, nil)
 		})
 	}
 }

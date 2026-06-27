@@ -3,6 +3,8 @@ package text
 import (
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/slack-go/slack"
 )
@@ -27,7 +29,9 @@ func ConvertMarkdownToRichTextBlock(md string) *slack.RichTextBlock {
 }
 
 // StripMarkdownForPlainText removes Markdown formatting to produce a plain text
-// string suitable for the notification fallback text field.
+// string suitable for the notification fallback text field. Slack mention tokens
+// (<@U123>, <#C123>, <!here>, ...) are intentionally left intact: Slack resolves
+// them server-side in the top-level message text field.
 func StripMarkdownForPlainText(md string) string {
 	lines := strings.Split(md, "\n")
 	var result []string
@@ -392,13 +396,16 @@ func parseInline(text string, baseStyle *slack.RichTextSectionTextStyle) []slack
 			if (text[i] == '*' && text[i+1] == '*') || (text[i] == '_' && text[i+1] == '_') {
 				delim := text[i : i+2]
 				if content, end, ok := matchDelimitedAt(text, i, delim, delim); ok {
-					flushPlain(i)
-					boldStyle := mergeStyle(baseStyle, &slack.RichTextSectionTextStyle{Bold: true})
-					inner := parseInline(content, boldStyle)
-					elements = append(elements, inner...)
-					i = end
-					plainStart = i
-					continue
+					// Underscore emphasis must respect intraword flanking; asterisks do not.
+					if text[i] != '_' || underscoreEmphasisAllowed(text, i, end) {
+						flushPlain(i)
+						boldStyle := mergeStyle(baseStyle, &slack.RichTextSectionTextStyle{Bold: true})
+						inner := parseInline(content, boldStyle)
+						elements = append(elements, inner...)
+						i = end
+						plainStart = i
+						continue
+					}
 				}
 			}
 		}
@@ -423,14 +430,28 @@ func parseInline(text string, baseStyle *slack.RichTextSectionTextStyle) []slack
 			// Make sure this is not a double delimiter (handled above)
 			if i+1 < len(text) && text[i+1] != text[i] {
 				if content, end, ok := matchDelimitedAt(text, i, delim, delim); ok {
-					flushPlain(i)
-					italicStyle := mergeStyle(baseStyle, &slack.RichTextSectionTextStyle{Italic: true})
-					inner := parseInline(content, italicStyle)
-					elements = append(elements, inner...)
-					i = end
-					plainStart = i
-					continue
+					// Underscore emphasis must respect intraword flanking; asterisks do not.
+					if text[i] != '_' || underscoreEmphasisAllowed(text, i, end) {
+						flushPlain(i)
+						italicStyle := mergeStyle(baseStyle, &slack.RichTextSectionTextStyle{Italic: true})
+						inner := parseInline(content, italicStyle)
+						elements = append(elements, inner...)
+						i = end
+						plainStart = i
+						continue
+					}
 				}
+			}
+		}
+
+		// Slack mention: <@U123>, <#C123|name>, <!subteam^S123>, <!here>, <!channel>
+		if text[i] == '<' {
+			if elem, end, ok := parseSlackMention(text, i, baseStyle); ok {
+				flushPlain(i)
+				elements = append(elements, elem)
+				i = end
+				plainStart = i
+				continue
 			}
 		}
 
@@ -498,4 +519,106 @@ func copyStyle(s *slack.RichTextSectionTextStyle) *slack.RichTextSectionTextStyl
 	}
 	cpy := *s
 	return &cpy
+}
+
+// isWordChar reports whether r is a "word" character for CommonMark-style
+// intraword underscore detection: an underscore, or any Unicode letter or digit.
+func isWordChar(r rune) bool {
+	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
+}
+
+// underscoreEmphasisAllowed applies a simplified CommonMark flanking rule for
+// `_`/`__` emphasis. The opening delimiter starts at index i; end is the index
+// just past the closing delimiter. Emphasis is allowed only when the opening
+// delimiter is at string start (or preceded by a non-word rune) AND the closing
+// delimiter is at string end (or followed by a non-word rune). This blocks
+// intraword underscores (foo_bar_baz, snake_case_name, foo__bar__baz) while
+// preserving boundary emphasis (_italic_, __bold__). Treating `_` itself as a
+// word char keeps the second `_` of a `__` run from re-opening as a single-
+// underscore italic on the fall-through pass.
+func underscoreEmphasisAllowed(text string, i, end int) bool {
+	if i > 0 {
+		before, _ := utf8.DecodeLastRuneInString(text[:i])
+		if isWordChar(before) {
+			return false
+		}
+	}
+	if end < len(text) {
+		after, _ := utf8.DecodeRuneInString(text[end:])
+		if isWordChar(after) {
+			return false
+		}
+	}
+	return true
+}
+
+// isValidMentionID reports whether id is a plausible Slack object ID: a non-empty
+// run of ASCII [A-Z0-9] whose first byte is one of allowedPrefixes.
+func isValidMentionID(id, allowedPrefixes string) bool {
+	if id == "" || strings.IndexByte(allowedPrefixes, id[0]) < 0 {
+		return false
+	}
+	for j := 0; j < len(id); j++ {
+		c := id[j]
+		if !((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+			return false
+		}
+	}
+	return true
+}
+
+// parseSlackMention parses a Slack mention token beginning at text[i] (which must
+// be '<'): <@U123>, <@U123|label>, <#C123|label>, <!subteam^S123|label>, <!here>,
+// <!channel>, or <!everyone>. On success it returns the typed rich_text element,
+// the index just past the closing '>', and true. For any malformed or
+// unrecognized token it returns (nil, 0, false) so the caller treats '<' as a
+// literal character. user/channel elements carry baseStyle; usergroup/broadcast
+// elements have no Style field in slack-go v0.19.0 and are emitted unstyled.
+func parseSlackMention(text string, i int, baseStyle *slack.RichTextSectionTextStyle) (slack.RichTextSectionElement, int, bool) {
+	if i >= len(text) || text[i] != '<' {
+		return nil, 0, false
+	}
+	rel := strings.IndexByte(text[i:], '>')
+	if rel < 0 {
+		return nil, 0, false
+	}
+	closeIdx := i + rel
+	inner := text[i+1 : closeIdx]
+	newIndex := closeIdx + 1
+
+	// Strip the optional "|label" fallback Slack permits.
+	id := inner
+	if pipe := strings.IndexByte(inner, '|'); pipe >= 0 {
+		id = inner[:pipe]
+	}
+	if id == "" {
+		return nil, 0, false
+	}
+
+	switch id[0] {
+	case '@': // user mention
+		userID := id[1:]
+		if !isValidMentionID(userID, "UWB") {
+			return nil, 0, false
+		}
+		return slack.NewRichTextSectionUserElement(userID, copyStyle(baseStyle)), newIndex, true
+	case '#': // channel mention
+		channelID := id[1:]
+		if !isValidMentionID(channelID, "CGD") {
+			return nil, 0, false
+		}
+		return slack.NewRichTextSectionChannelElement(channelID, copyStyle(baseStyle)), newIndex, true
+	case '!': // broadcast or usergroup
+		switch {
+		case id == "!here", id == "!channel", id == "!everyone":
+			return slack.NewRichTextSectionBroadcastElement(id[1:]), newIndex, true
+		case strings.HasPrefix(id, "!subteam^"):
+			groupID := id[len("!subteam^"):]
+			if !isValidMentionID(groupID, "S") {
+				return nil, 0, false
+			}
+			return slack.NewRichTextSectionUserGroupElement(groupID), newIndex, true
+		}
+	}
+	return nil, 0, false
 }

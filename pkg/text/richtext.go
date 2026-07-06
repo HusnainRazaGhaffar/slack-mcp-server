@@ -96,6 +96,12 @@ type rtParser struct {
 	listIndent     int
 	codeLines      []string
 	inCodeBlock    bool
+
+	// pendingBlank records that one or more Markdown blank lines separated the
+	// last emitted block from the next one, so the next block gets a spacer
+	// section that reproduces the empty line in Slack (which otherwise runs
+	// blocks together).
+	pendingBlank bool
 }
 
 // RichTextElement is slack.RichTextElement -- we re-export nothing, just use
@@ -132,10 +138,12 @@ func (p *rtParser) parse() {
 			continue
 		}
 
-		// Blank line -- flush accumulators
+		// Blank line -- flush accumulators and remember the gap so the next block
+		// gets a spacer section (Markdown blank line -> visible empty line in Slack).
 		if trimmed == "" {
 			p.flushParagraph()
 			p.flushList()
+			p.pendingBlank = true
 			continue
 		}
 
@@ -184,10 +192,30 @@ func (p *rtParser) parse() {
 	p.flushList()
 }
 
+// emitSpacerIfPending inserts a single blank-line spacer when the source had one
+// or more blank lines since the last emitted block. Slack concatenates rich_text
+// sections, so a lone "\n" section renders as the empty line a Markdown blank line
+// implies. Consecutive blank lines collapse to one spacer, and a blank line before
+// any content or after the last block is dropped so the message has no stray empty
+// lines at its edges.
+func (p *rtParser) emitSpacerIfPending() {
+	if !p.pendingBlank {
+		return
+	}
+	p.pendingBlank = false
+	if len(p.elements) == 0 {
+		return
+	}
+	p.elements = append(p.elements, slack.NewRichTextSection(
+		slack.NewRichTextSectionTextElement("\n", nil),
+	))
+}
+
 func (p *rtParser) flushParagraph() {
 	if len(p.paragraphLines) == 0 {
 		return
 	}
+	p.emitSpacerIfPending()
 	text := strings.Join(p.paragraphLines, "\n")
 	elems := parseInlineElements(text)
 	// Append a trailing newline so paragraphs have spacing
@@ -200,6 +228,7 @@ func (p *rtParser) flushList() {
 	if len(p.listItems) == 0 {
 		return
 	}
+	p.emitSpacerIfPending()
 
 	// Group consecutive items by indent level. When indent changes, emit the
 	// accumulated group and start a new one.
@@ -239,6 +268,7 @@ func (p *rtParser) addListItem(text string, indent int, style slack.RichTextList
 }
 
 func (p *rtParser) flushCodeBlock() {
+	p.emitSpacerIfPending()
 	code := strings.Join(p.codeLines, "\n")
 	textElem := slack.NewRichTextSectionTextElement(code, nil)
 	preformatted := &slack.RichTextPreformatted{
@@ -252,6 +282,7 @@ func (p *rtParser) flushCodeBlock() {
 }
 
 func (p *rtParser) emitQuote(text string) {
+	p.emitSpacerIfPending()
 	elems := parseInlineElements(text)
 	quote := &slack.RichTextQuote{
 		Type:     slack.RTEQuote,
@@ -261,6 +292,7 @@ func (p *rtParser) emitQuote(text string) {
 }
 
 func (p *rtParser) emitHeading(text string) {
+	p.emitSpacerIfPending()
 	elems := parseInlineElements(text)
 	// Apply bold to all text elements since Slack has no heading concept
 	boldElems := make([]slack.RichTextSectionElement, 0, len(elems))

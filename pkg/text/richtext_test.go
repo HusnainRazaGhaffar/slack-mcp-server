@@ -202,30 +202,85 @@ func TestConvertMarkdownToRichTextBlock_MixedContent(t *testing.T) {
 	block := ConvertMarkdownToRichTextBlock(input)
 	require.NotNil(t, block)
 
-	// Heading + paragraph + bullet list + code block + final paragraph
-	require.Len(t, block.Elements, 5, "expected 5 elements for mixed content, got %d", len(block.Elements))
+	// Heading, paragraph, bullet list, code block, and final paragraph, each pair
+	// separated by a blank line in the source, so a spacer section sits between
+	// every content block: 5 content blocks + 4 spacers = 9 elements.
+	require.Len(t, block.Elements, 9, "expected 9 elements (5 content + 4 spacers), got %d", len(block.Elements))
 
 	// Heading
 	_, ok := block.Elements[0].(*slack.RichTextSection)
 	assert.True(t, ok, "element 0 should be RichTextSection (heading)")
+	assertSpacer(t, block.Elements[1])
 
 	// Paragraph
-	_, ok = block.Elements[1].(*slack.RichTextSection)
-	assert.True(t, ok, "element 1 should be RichTextSection (paragraph)")
+	_, ok = block.Elements[2].(*slack.RichTextSection)
+	assert.True(t, ok, "element 2 should be RichTextSection (paragraph)")
+	assertSpacer(t, block.Elements[3])
 
 	// Bullet list
-	list, ok := block.Elements[2].(*slack.RichTextList)
-	assert.True(t, ok, "element 2 should be RichTextList")
+	list, ok := block.Elements[4].(*slack.RichTextList)
+	assert.True(t, ok, "element 4 should be RichTextList")
 	assert.Equal(t, slack.RTEListBullet, list.Style)
 	require.Len(t, list.Elements, 2)
+	assertSpacer(t, block.Elements[5])
 
 	// Code block
-	_, ok = block.Elements[3].(*slack.RichTextPreformatted)
-	assert.True(t, ok, "element 3 should be RichTextPreformatted")
+	_, ok = block.Elements[6].(*slack.RichTextPreformatted)
+	assert.True(t, ok, "element 6 should be RichTextPreformatted")
+	assertSpacer(t, block.Elements[7])
 
 	// Final paragraph
-	_, ok = block.Elements[4].(*slack.RichTextSection)
-	assert.True(t, ok, "element 4 should be RichTextSection (final paragraph)")
+	_, ok = block.Elements[8].(*slack.RichTextSection)
+	assert.True(t, ok, "element 8 should be RichTextSection (final paragraph)")
+}
+
+// Issue: Markdown blank lines between blocks were dropped, so Slack ran the
+// blocks together and messages looked crammed. A blank line must survive as a
+// spacer section; a tight boundary (a header directly above its list, with no
+// blank line) must NOT gain one.
+func TestConvertMarkdownToRichTextBlock_BlankLineSpacing(t *testing.T) {
+	t.Run("blank line between paragraphs yields a spacer", func(t *testing.T) {
+		block := ConvertMarkdownToRichTextBlock("First para.\n\nSecond para.")
+		require.Len(t, block.Elements, 3)
+		_, ok := block.Elements[0].(*slack.RichTextSection)
+		require.True(t, ok)
+		assertSpacer(t, block.Elements[1])
+		_, ok = block.Elements[2].(*slack.RichTextSection)
+		require.True(t, ok)
+	})
+
+	t.Run("no blank line means no spacer", func(t *testing.T) {
+		// Bold header line directly above its bullet list (the common tight case).
+		block := ConvertMarkdownToRichTextBlock("**What breaks:**\n- one\n- two")
+		require.Len(t, block.Elements, 2)
+		_, ok := block.Elements[0].(*slack.RichTextSection)
+		require.True(t, ok, "element 0 should be the header paragraph")
+		_, ok = block.Elements[1].(*slack.RichTextList)
+		require.True(t, ok, "element 1 should be the list, with no spacer before it")
+	})
+
+	t.Run("blank line after a list yields a spacer before the next paragraph", func(t *testing.T) {
+		block := ConvertMarkdownToRichTextBlock("- one\n- two\n\nAfter the list.")
+		require.Len(t, block.Elements, 3)
+		_, ok := block.Elements[0].(*slack.RichTextList)
+		require.True(t, ok)
+		assertSpacer(t, block.Elements[1])
+		_, ok = block.Elements[2].(*slack.RichTextSection)
+		require.True(t, ok)
+	})
+
+	t.Run("consecutive blank lines collapse to one spacer", func(t *testing.T) {
+		block := ConvertMarkdownToRichTextBlock("A\n\n\n\nB")
+		require.Len(t, block.Elements, 3)
+		assertSpacer(t, block.Elements[1])
+	})
+
+	t.Run("no leading or trailing spacer", func(t *testing.T) {
+		block := ConvertMarkdownToRichTextBlock("\n\nOnly para.\n\n")
+		require.Len(t, block.Elements, 1)
+		_, ok := block.Elements[0].(*slack.RichTextSection)
+		require.True(t, ok)
+	})
 }
 
 func TestConvertMarkdownToRichTextBlock_EmptyInput(t *testing.T) {
@@ -538,4 +593,16 @@ func assertListItemText(t *testing.T, elem slack.RichTextElement, expectedText s
 		t.Fatalf("expected *RichTextSectionTextElement in list item, got %T", section.Elements[0])
 	}
 	assert.Equal(t, expectedText, textElem.Text)
+}
+
+// assertSpacer verifies elem is a blank-line spacer: a RichTextSection whose only
+// content is a single "\n" text element.
+func assertSpacer(t *testing.T, elem slack.RichTextElement) {
+	t.Helper()
+	section, ok := elem.(*slack.RichTextSection)
+	require.True(t, ok, "expected spacer *RichTextSection, got %T", elem)
+	require.Len(t, section.Elements, 1, "spacer should have exactly one element")
+	textElem, ok := section.Elements[0].(*slack.RichTextSectionTextElement)
+	require.True(t, ok, "spacer element should be a text element, got %T", section.Elements[0])
+	assert.Equal(t, "\n", textElem.Text, "spacer text should be a single newline")
 }

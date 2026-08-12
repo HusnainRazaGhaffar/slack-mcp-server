@@ -195,7 +195,7 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 			),
 			mcp.WithString("content_type",
 				mcp.DefaultString("text/markdown"),
-				mcp.Description("Content type of the message. Default is 'text/markdown'. Allowed values: 'text/markdown', 'text/plain'. Ignored when blocks is provided."),
+				mcp.Description("Content type of the message. Default is 'text/markdown'. Allowed values: 'text/markdown', 'text/plain'. Use 'text/markdown' for ANY message containing lists, headings, bold, italics, links, code, or mentions; it is rendered as native Slack formatting. 'text/plain' is sent exactly as typed with no conversion, and Slack may auto-format literal numbered lines inconsistently, so NEVER use 'text/plain' for lists or formatted text. Ignored when blocks is provided."),
 			),
 			mcp.WithString("blocks",
 				mcp.Description("Raw Slack Block Kit JSON array for rich message formatting (rich_text lists, code blocks, etc.). When provided, this takes precedence over text/content_type for rendering. The text parameter becomes the notification fallback text."),
